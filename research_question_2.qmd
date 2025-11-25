@@ -1,0 +1,36 @@
+---
+title: "research_question_2"
+format: pdf
+editor: visual
+---
+
+```{r load-packages, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+energy_rq2 <- read_excel("owid-energy-data.xlsx") %>%
+  select(country, year, renewables_share_elec,
+         fossil_share_elec, electricity_generation,
+         gdp, population) %>%
+  mutate(
+    renewable_majority = if_else(renewables_share_elec > 50, 1, 0),
+    gdp_per_capita = gdp / population
+  ) %>%
+  filter(!is.na(renewable_majority),
+         !is.na(fossil_share_elec),
+         !is.na(gdp_per_capita))
+
+glimpse(energy_rq2)
+```
+
+**Research question 2:**
+
+**What factors are associated with a country having \>50% renewable electricity share?**
+
+-   Outcome variable (include the name/description and type of variable):
+    -   `renewable_majority` **(Binary)**: indicates whether a country generates more than half of its electricity from renewable energy sources (1 = yes, 0 = no).）
+        -   Constructed as 1 if `renewables_share_elec` \> 50, otherwise 0

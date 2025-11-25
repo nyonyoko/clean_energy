@@ -1,0 +1,30 @@
+---
+title: "research_question_1"
+format: pdf
+editor: visual
+---
+
+```{r load-packages, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r data-1, warning=FALSE}
+#Read the dataset, select the columns to be used and drop the missing data
+energy_rq1 <- read_excel("owid-energy-data.xlsx") %>%
+  select(country, year, gdp, population, carbon_intensity_elec,fossil_share_elec,electricity_generation) %>%
+  mutate(gdp_per_capita = gdp / population) %>%
+  filter(!is.na(carbon_intensity_elec),
+         !is.na(gdp_per_capita))
+
+glimpse(energy_rq1)
+```
+
+**Research question 1:**
+
+**Does a country’s GDP per capita significantly affect the carbon intensity of its electricity generation, and does this relationship differ between high-income and low-income countries?**
+
+-   Outcome variable (include the name/description and type of variable):
+    -   `carbon_intensity_elec` **(continuous)**：measures the amount of carbon dioxide emitted per unit of electricity generated (grams of CO₂ per kilowatt-hour). It captures how carbon-efficient a country’s electricity production is — lower values indicate cleaner, more renewable-based power systems.
