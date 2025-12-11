@@ -1,0 +1,629 @@
+---
+title: "Economic Development and Clean Energy: Impacts on Carbon Intensity and Renewable Electricity Adoption"
+author:
+  - "Aesha Gandhi"
+  - "Yiyun (Leo) Yao"
+  - "Junhao Xu"
+  - "Sebine Scaria"
+date: "2025-12-03"
+format:
+  pdf:
+    number-sections: true
+    toc: false
+    fig-cap-location: bottom
+execute:
+  echo: false
+  message: false
+  warning: false
+editor: visual
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(broom)
+library(knitr)
+library(pROC)
+library(sandwich)
+library(lmtest)
+
+theme_set(theme_bw())
+set.seed(42)
+```
+
+```{r load-data, include=FALSE}
+# Load main OWID energy data
+energy_df <- read_excel("owid-energy-data.xlsx")
+
+# ---------- RQ1 data (carbon intensity & GDP, with income group) ----------
+data_rq1 <- energy_df %>%
+  select(country, year, gdp, population,
+         carbon_intensity_elec, fossil_share_elec,
+         electricity_generation) %>%
+  mutate(gdp_per_capita = gdp / population) %>%
+  filter(!is.na(carbon_intensity_elec),
+         !is.na(gdp_per_capita))
+
+# Load World Bank income classification
+income_raw <- read.csv(
+  "https://raw.githubusercontent.com/owid/owid-datasets/master/datasets/Country%20Income%20Classification%20-%20World%20Bank%20(2017)/Country%20Income%20Classification%20-%20World%20Bank%20(2017).csv"
+)
+
+income <- income_raw %>%
+  rename(
+    country = Entity,
+    income_code = Income.classification..World.Bank.2017.,
+    year = Year
+  ) %>%
+  mutate(income_group = case_when(
+    income_code == 1 ~ "Low income",
+    income_code == 2 ~ "Lower middle income",
+    income_code == 3 ~ "Upper middle income",
+    income_code == 4 ~ "High income"
+  ))
+
+data_rq1 <- data_rq1 %>%
+  left_join(income %>% select(country, year, income_group),
+            by = c("country", "year")) %>%
+  filter(!is.na(income_group)) %>%
+  mutate(
+    log_gdp = log(gdp_per_capita),
+    income_group = factor(
+      income_group,
+      levels = c("Low income", "Lower middle income",
+                 "Upper middle income", "High income")
+    )
+  )
+
+# ---------- RQ2 data (renewable majority) ----------
+data_rq2 <- energy_df %>%
+  select(country, year,
+         renewables_share_elec,
+         fossil_share_elec,
+         electricity_generation,
+         gdp, population) %>%
+  mutate(
+    renewable_majority = if_else(renewables_share_elec > 50, 1, 0),
+    gdp_per_capita = gdp / population
+  ) %>%
+  filter(
+    !is.na(renewable_majority),
+    !is.na(fossil_share_elec),
+    !is.na(gdp_per_capita),
+    !is.na(electricity_generation)
+  ) %>%
+  mutate(
+    log_gdp = log(gdp_per_capita),
+    log_generation = log(electricity_generation)
+  )
+
+# ---------- Fit models used throughout ----------
+# RQ1: raw model (untransformed GDP) – used for discussion in appendix
+raw_model_rq1 <- lm(
+  carbon_intensity_elec ~ gdp_per_capita * income_group,
+  data = data_rq1
+)
+
+# RQ1: linear regression with log(GDP) interaction and added year fixed effects
+model_rq1 <- lm(
+  carbon_intensity_elec ~ log_gdp * income_group + factor(year),
+  data = data_rq1
+)
+
+# RQ2: logistic regression (renewables > 50%)
+model_rq2 <- glm(
+  renewable_majority ~ log_gdp + log_generation + fossil_share_elec,
+  data = data_rq2,
+  family = binomial
+)
+```
+
+# Data Science Memo
+
+**Stakeholder (Target Audience).** This memo is written for a **senior energy policy analyst at a multilateral development bank** (for example, the World Bank). The analyst advises on financing decisions for electricity-sector projects across low-, middle-, and high-income countries. They are familiar with basic statistics and regression output but are not a specialist in econometrics or energy systems modeling.
+
+## Executive Summary / TL;DR
+
+Rapid decarbonization of electricity is essential to meeting global climate goals, yet fossil fuels still provide most of the world’s power. Using a global country–year dataset on energy and economic indicators from 1965–2023, we address two questions: **(1)** How does a country’s economic development relate to the carbon intensity of its electricity generation, and does this relationship differ by income level? **(2)** What factors are associated with a country achieving a **\>50% renewable** electricity share?
+
+For **Research Question 1**, we find that **economic growth has opposite associations with power-sector emissions in low vs. high income countries**. In **low-income countries**, higher GDP per capita is associated with **more carbon-intensive electricity**: a one-percentage increase in GDP per capita corresponds to approximately **+1.05 grams of CO₂ per kWh**. In **high-income countries**, the same increase in log GDP per capita corresponds to about **–81 grams of CO₂ per kWh**. In other words, as the richest countries grow, their electricity tends to become cleaner, while in the poorest countries, growth comes with dirtier electricity.
+
+For **Research Question 2**, we define a binary outcome indicating whether a country in a given year generates **more than 50% of its electricity from renewable sources**. Only about **7%** of country–year observations in our data meet this threshold. A logistic regression shows that the **share of fossil fuels in the power mix** is by far the dominant factor: each 1 percentage-point increase in fossil fuel share multiplies the odds of a renewables-majority by about **0.87** (an 80% reduction in odds for a 10-point increase). **Although GDP per capita and total electricity generation are statistically significant predictors, their effect sizes are modest; in contrast, fossil fuel share is both statistically and practically significant, showing the largest influence on whether a country exceeds 50% renewable electricity.**
+
+**Implications.** For low-income countries, economic growth tends to **increase** the carbon intensity of electricity, unless there is proactive investment in clean power. For high-income countries, growth can coincide with **decreasing** carbon intensity if it is accompanied by policies that push the grid toward renewables. Combining the two insights together, we see that achieving a majority-renewable electricity system is more primarily a matter of **reducing fossil fuel dependence**, rather than simply being low- or high-income. Targeted financing for renewables, policies that discourage use of coal and gas, and support for grid flexibility are more effective than relying on income growth alone.
+
+## Key Decisions for the Stakeholder
+
+1.  **How aggressively to finance clean power in low-income countries.** Since growth in low-income economies is currently associated with more fossil-based generation, the bank must decide whether to scale up funding for renewable generation and grid expansion to help these countries avoid a fossil-heavy development path.
+
+2.  **How to prioritize policy and technical assistance.** The strongest predictor of a majority-renewable grid is low fossil fuel dependence. The stakeholder must decide whether to prioritize support for policies that directly reduce fossil generation (e.g., coal retirement programs, carbon pricing, etc.) over more general economic development interventions.
+
+3.  **Where to focus grid and storage investments.** Moving from a minority to majority-renewable grid requires high levels of grid flexibility and reliability. The stakeholder must decide which countries need support for storage, regional grid integration, and modern grid management tools to enable higher renewable shares without compromising reliability.
+
+4.  **How to allocate analytic resources.** Finally, the stakeholder must decide whether to conduct deeper country-specific researches (e.g., resource assessments, policy diagnostics, etc.) for countries near the 50% threshold, to better understand the obstacles and opportunities for decarbonizing their power systems.
+
+## Background and Problem Motivation
+
+Electricity generation is one of the largest contributors to global greenhouse gas emissions. Many countries have committed to decarbonizing their power sectors for achieving climate targets (IPCC, 2022), but progress varies widely. Some nations already generate most of their electricity from renewables, often leveraging hydro or geothermal resources, while others still rely heavily on coal, oil, and gas for power generation (IEA, various years; Ember Climate, various years).
+
+At the same time, countries are at very different stages of economic development. High-income countries increasingly proposes “decoupling” economic growth from emissions, while low-income countries often argue that they should not be required to forego fossil-fueled growth without financial and technological support (World Bank, 2023). Understanding how **GDP per capita**, **income level**, and **energy mix** relate to both the **carbon intensity of electricity** and the **likelihood of a renewables-majority grid** is therefore essential to designing effective development and climate strategies.
+
+Our analysis is intended to inform these decisions using historically observed relationships across nearly six decades of global electricity and economic data (Our World in Data, 2024).
+
+## Data and Approach (High Level)
+
+We use a dataset compiled by *Our World in Data* that combines multiple international sources and reports annual statistics for most countries worldwide from 1965 onward. Each observation represents a **country–year** with indicators on:
+
+-   **Electricity generation (TWh)**
+-   **Carbon intensity of electricity** (grams of CO₂ per kWh)
+-   **Share of electricity from fossil fuels** (coal, oil, gas)
+-   **Share of electricity from renewable sources** (including hydro, wind, solar, and others)
+-   **Gross domestic product (GDP)** and **population**, from which we compute **GDP per capita**
+
+We augment this with **World Bank income group classifications** (Low, Lower middle, Upper middle, High income) to capture development stage. After dropping observations with missing key fields, we retain roughly nine thousand country–year observations, spanning over 180 countries between 1965 and 2023.
+
+Analytically:
+
+-   For **RQ1**, we fit a **linear regression** of carbon intensity on **log GDP per capita**, income group, and their interaction, allowing the effect of income to differ across development stages. The model also includes controls for the year of observation, so that results reflect differences across countries rather than global changes over time.
+-   For **RQ2**, we define a binary outcome indicating whether **renewables provide more than half** of electricity, and fit a **logistic regression** where the predictors are **log GDP per capita**, **log electricity generation**, and **fossil fuel share of electricity**.
+
+Technical details, such as data cleaning steps and diagnostic plots, are presented in the technical appendix.
+
+## Results: Research Question 1
+
+### Does GDP per capita affect carbon intensity of electricity, and does this differ by income group?
+
+### Descriptive Patterns
+
+```{r fig-rq1-scatter, fig.cap="Carbon intensity vs. GDP per capita by income group."}
+ggplot(data_rq1,
+       aes(x = log_gdp,
+           y = carbon_intensity_elec,
+           color = income_group)) +
+  geom_point(alpha = 0.35) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    x = "Log GDP per capita (international $)",
+    y = "Carbon intensity of electricity (grams CO\u2082 per kWh)",
+    color = "Income group"
+  )
+```
+
+The plot suggests that the relationship between log GDP per capita and carbon intensity differs across income groups, with each group showing its own general pattern rather than a single consistent trend, and especially, the higher-income group shows a downward-sloping relationship. Note, the figure shows raw data patterns, but the regression model includes year fixed effects to adjust for temporal confounding.
+
+```{r tbl-rq1-coefs, results='asis', include=FALSE}
+coefs_rq1 <- tidy(model_rq1, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+
+term_map_rq1 <- c(
+  "log_gdp" = "Log GDP per capita",
+  "income_groupLower middle income" = "Lower-middle income (vs. low)",
+  "income_groupUpper middle income" = "Upper-middle income (vs. low)",
+  "income_groupHigh income" = "High income (vs. low)",
+  "log_gdp:income_groupLower middle income" = "Log GDP × lower-middle income",
+  "log_gdp:income_groupUpper middle income" = "Log GDP × upper-middle income",
+  "log_gdp:income_groupHigh income" = "Log GDP × high income"
+)
+
+coefs_rq1$Characteristic <- term_map_rq1[coefs_rq1$term]
+
+tbl_rq1 <- coefs_rq1 %>%
+  select(Characteristic,
+         estimate,
+         std.error,
+         conf.low,
+         conf.high,
+         p.value) %>%
+  mutate(
+    estimate = round(estimate, 2),
+    std.error = round(std.error, 2),
+    `95% CI` = paste0(round(conf.low, 2), ", ", round(conf.high, 2)),
+    `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) %>%
+  select(Characteristic,
+         Estimate = estimate,
+         `Std. Error` = std.error,
+         `95% CI`,
+         `p-value`)
+
+kable(
+  tbl_rq1,
+  caption = "Linear regression of carbon intensity of electricity on log GDP per capita, income group, and their interaction."
+)
+```
+
+Interpretation:
+
+Because year fixed effects absorb global time trends, the coefficient estimates reflect within-year cross-country variation.
+
+-   For **low-income countries** (reference group), a one-percentage increase in log GDP per capita is associated with an increase of about **1.05 grams CO₂ per kWh** in carbon intensity.
+-   **For high-income countries**, the interaction term reverses the direction of the effect. After combining the main effect and interaction, a 1% increase in GDP per capita is associated with carbon intensity that is **about 0.81 grams CO₂ per kWh lower** compared to low-income countries. This indicates that, among high-income countries, greater economic development is associated with **lower** carbon intensity.
+-   For **lower-middle** and **upper-middle income countries**, the interaction terms are negative but not statistically significant at the 5% level. This means that their slopes cannot be distinguished from the low-income slope, and we cannot conclude that their GDP–carbon intensity relationship differs from low-income countries.
+
+## Research Question 2: What factors are associated with having \>50% renewable electricity?
+
+```{r fig-rq2-density, fig.cap="Fossil fuel share for years with and without >50% renewable electricity."}
+ggplot(
+  data_rq2,
+  aes(
+    x = fossil_share_elec,
+    fill = factor(
+      renewable_majority,
+      labels = c("No majority", "Majority renewables")
+    )
+  )
+) +
+  geom_density(alpha = 0.4) +
+  labs(
+    x = "Fossil fuel share of electricity (%)",
+    y = "Density",
+    fill = "Renewable majority"
+  )
+```
+
+Country–years with a renewables majority tend to have very low fossil shares, while those without such a majority rely heavily on fossil fuels.
+
+### Main Model Results
+
+```{r tbl-rq2-logit, results='asis'}
+res_rq2 <- tidy(model_rq2, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)")
+
+term_map_rq2 <- c(
+  "log_gdp" = "GDP per capita (log)",
+  "log_generation" = "Electricity generation (log, TWh)",
+  "fossil_share_elec" = "Fossil fuel share of electricity (%)"
+)
+
+res_rq2$Characteristic <- term_map_rq2[res_rq2$term]
+
+tbl_rq2 <- res_rq2 %>%
+  select(Characteristic,
+         estimate,
+         conf.low,
+         conf.high,
+         p.value) %>%
+  mutate(
+    OR = round(estimate, 3),
+    `95% CI` = paste0(round(conf.low, 3), ", ", round(conf.high, 3)),
+    `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) %>%
+  select(Characteristic, OR, `95% CI`, `p-value`)
+
+kable(
+  tbl_rq2,
+  caption = "Logistic regression for probability of having >50% renewable electricity (odds ratios)."
+)
+```
+
+Key findings:
+
+-   **Fossil fuel share** has an odds ratio well closer to 1, meaning each additional percentage point of fossil generation sharply reduces the odds of having a renewables majority.
+-   **GDP per capita** and **total electricity generation** are statistically significant predictors, but their odds ratios are far from 1 and their effect sizes are modest compared with fossil fuel share. In other words, the composition of the power mix matters much more than income level or grid size.
+
+\newpage
+
+### ROC Analysis (Model Performance)
+
+The ROC curve and AUC summarize how well the logistic model distinguishes between country–years with and without a renewables majority.
+
+```{r fig-rq2-roc, fig.height=3, fig.width=4.5, fig.align='center', fig.pos='H', fig.cap="ROC curve for renewable majority model (AUC \u2248 0.98)."}
+# Predicted probabilities for ROC
+pred_prob_rq2 <- predict(model_rq2, type = "response")
+
+roc_rq2 <- roc(response = data_rq2$renewable_majority,
+               predictor = pred_prob_rq2)
+
+auc_rq2 <- auc(roc_rq2)
+
+plot(
+  roc_rq2,
+  main = paste0("ROC curve (AUC = ", round(auc_rq2, 3), ")"),
+  xlim = c(0, 1),
+  ylim = c(0, 1)
+)
+abline(a = 0, b = 1, lty = 2, col = "gray50")
+```
+
+The ROC curve lies well above the diagonal reference line, and the AUC (area under the curve) is about **0.98**, indicating excellent ability to distinguish between years with and without a renewables majority. Such a strong performance is driven mainly by the fossil fuel share predictor.
+
+## Conclusion and Recommendations
+
+Across nearly six decades of global data, we find:
+
+-   Economic development and carbon intensity of electricity are linked in **opposite ways** for low- and high-income countries.
+-   Achieving a **majority-renewable electricity mix** is primarily a function of **limiting fossil fuel share**, not simply of income level or grid size.
+
+**Recommendations:**
+
+1.  **Prioritize clean power investments in low-income countries.** Financing solar, wind, hydro, and supporting grid infrastructure can help these countries grow without sharply increasing power-sector emissions.
+
+2.  **Support policies that reduce fossil fuel dependence.** Instruments such as carbon pricing, renewable portfolio standards, and the removal of fossil fuel subsidies can shift the economics toward renewables and lower fossil shares.
+
+3.  **Invest in enabling technologies.** To sustain high renewable shares, countries need storage, flexible grids, and sometimes regional power integration. Supporting these technologies will make it easier for countries to move beyond the 50% renewables threshold.
+
+4.  **Encourage knowledge and technology transfer.** High-income countries that have begun to decarbonize can share policy experience and technology with lower-income countries, helping them avoid high-carbon development paths.
+
+{{< pagebreak >}}
+
+# Technical Appendix
+
+## Data
+
+The main dataset used in this project is a global energy dataset compiled by *Our World in Data*. It reports annual values for:
+
+-   Total electricity generation (TWh)
+-   Carbon intensity of electricity (grams of CO₂ per kWh)
+-   Shares of electricity from fossil fuels and renewables
+-   GDP and population
+
+We restrict attention to **country-level** records between **1965 and 2023**, which is the period during which electricity statistics are relatively complete. Regional aggregates and historical entities are excluded.
+
+Transformations and filters:
+
+-   GDP per capita was computed as GDP divided by population.
+-   For **RQ1**, we kept country–years with non-missing carbon intensity, GDP per capita, and income group.
+-   For **RQ2**, we kept country–years with non-missing renewable share, fossil share, GDP per capita, and electricity generation.
+-   We merged World Bank income group classifications (low, lower middle, upper middle, high income) by country and year.
+-   Log transformations of GDP per capita and electricity generation were used to handle strong right skewness.
+
+There was substantial missing data in several of the key variables, especially carbon intensity of electricity (75%), fossil fuel share (69%), and electricity generation (66%). GDP is missing for approximately 49% of country-years, and population for about 19%. Because these missing values are concentrated in earlier decades and many countries lack consistent reporting, we did not impute missing entries; instead, we restricted our analysis to complete cases for the variables required in each model.
+
+```{r}
+#  missing data summary for all variables used 
+
+vars_used <- energy_df %>%
+  select(
+    country, year,
+    gdp, population,
+    carbon_intensity_elec, fossil_share_elec,
+    electricity_generation,
+    renewables_share_elec
+  )
+
+missing_summary <- vars_used %>%
+  summarise(across(everything(),
+                   ~ sum(is.na(.)),
+                   .names = "n_miss_{.col}")) %>%
+  pivot_longer(
+    everything(),
+    names_to = "variable",
+    values_to = "n_missing"
+  ) %>%
+  mutate(
+    variable = gsub("n_miss_", "", variable),
+    pct_missing = round(100 * n_missing / nrow(vars_used), 2)
+  )
+
+knitr::kable(missing_summary, caption = "Missing Data Summary for All Variables Used")
+
+
+```
+
+## Models
+
+### RQ1: Carbon intensity and GDP per capita
+
+We modeled **carbon intensity of electricity** as a continuous outcome in a linear regression. Low-income countries serve as the reference group.
+
+The log transformation of GDP per capita addresses extreme skew and makes proportional changes in income more interpretable. The interaction term allows the slope of GDP per capita to vary across income groups, which is essential for testing whether development operates differently in poorer vs. richer countries.
+
+#### Model selection and transformation
+
+As an initial step, we fit a model using **untransformed GDP per capita**. Diagnostic plots for this raw model showed strong curvature in the residuals versus fitted values and strong heteroskedasticity, consistent with our exploratory plots in which GDP per capita was extremely right-skewed. After replacing GDP per capita with **log(GDP per capita)**, the residual plots became more linear and the spread of residuals became more stable across fitted values.
+
+```{r, include=FALSE}
+coefs_rq1 <- tidy(model_rq1, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+
+term_map_rq1 <- c(
+  "log_gdp" = "Log GDP per capita",
+  "income_groupLower middle income" = "Lower-middle income (vs. low)",
+  "income_groupUpper middle income" = "Upper-middle income (vs. low)",
+  "income_groupHigh income" = "High income (vs. low)",
+  "log_gdp:income_groupLower middle income" = "Log GDP × lower-middle income",
+  "log_gdp:income_groupUpper middle income" = "Log GDP × upper-middle income",
+  "log_gdp:income_groupHigh income" = "Log GDP × high income"
+)
+
+coefs_rq1$Characteristic <- term_map_rq1[coefs_rq1$term]
+
+tbl_rq1 <- coefs_rq1 %>%
+  select(Characteristic,
+         estimate,
+         std.error,
+         conf.low,
+         conf.high,
+         p.value) %>%
+  mutate(
+    estimate = round(estimate, 2),
+    std.error = round(std.error, 2),
+    `95% CI` = paste0(round(conf.low, 2), ", ", round(conf.high, 2)),
+    `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) %>%
+  select(Characteristic,
+         Estimate = estimate,
+         `Std. Error` = std.error,
+         `95% CI`,
+         `p-value`)
+
+kable(
+  tbl_rq1,
+  caption = "Linear regression of carbon intensity of electricity on log GDP per capita, income group, and their interaction."
+)
+```
+
+Because the dataset contains repeated measures for each country across years, standard errors are clustered at the country level to account for heteroskedasticity and correlation within countries. Because the dataset contains repeated yearly observations for each country, we include year fixed effects in the RQ1 model. This controls for global technological, policy, and decarbonization trends that change systematically over time and might otherwise confound the relationship between GDP per capita and carbon intensity. Including year fixed effects makes sure that estimates capture cross-country differences after accounting for global changes over time.
+
+We therefore retained this log-transformed model (with the robust standard errors):
+
+```{r}
+robust_results <- coeftest(model_rq1,
+                           vcov = vcovCL(model_rq1, cluster = ~ country))
+
+coefs_rq1 <- tidy(robust_results, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  filter(!grepl("year", term))
+
+term_map_rq1 <- c(
+  "log_gdp" = "Log GDP per capita",
+  "income_groupLower middle income" = "Lower-middle income (vs. low)",
+  "income_groupUpper middle income" = "Upper-middle income (vs. low)",
+  "income_groupHigh income" = "High income (vs. low)",
+  "log_gdp:income_groupLower middle income" = "Log GDP × lower-middle income",
+  "log_gdp:income_groupUpper middle income" = "Log GDP × upper-middle income",
+  "log_gdp:income_groupHigh income" = "Log GDP × high income"
+)
+
+coefs_rq1$Characteristic <- term_map_rq1[coefs_rq1$term]
+
+tbl_rq1 <- coefs_rq1 %>%
+  select(Characteristic,
+         estimate,
+         std.error,
+         conf.low,
+         conf.high,
+         p.value) %>%
+  mutate(
+    estimate = round(estimate, 2),
+    std.error = round(std.error, 2),
+    `95% CI` = paste0(round(conf.low, 2), ", ", round(conf.high, 2)),
+    `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) %>%
+  select(Characteristic,
+         Estimate = estimate,
+         `Std. Error` = std.error,
+         `95% CI`,
+         `p-value`)
+
+kable(
+  tbl_rq1,
+  caption = "Linear regression of carbon intensity of electricity on log GDP per capita, income group, and their interaction, with year fixed effects and clustered standard errors."
+)
+
+```
+
+```{r rq1-full-output, results='asis', include=FALSE}
+rq1_full_tbl <- tidy(model_rq1, conf.int = TRUE) %>%
+  mutate(
+    estimate = round(estimate, 2),
+    std.error = round(std.error, 2),
+    conf.low = round(conf.low, 2),
+    conf.high = round(conf.high, 2),
+    `p-value` = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) %>%
+  select(term,
+         Estimate = estimate,
+         `Std. Error` = std.error,
+         `Conf. Low` = conf.low,
+         `Conf. High` = conf.high,
+         `p-value`)
+
+kable(
+  rq1_full_tbl,
+  caption = "Full linear regression output for carbon intensity model."
+)
+```
+
+#### Diagnostics
+
+```{r rq1-diagnostics, fig.width=7, fig.height=5, fig.cap="Regression diagnostics for carbon intensity model."}
+par(mfrow = c(2, 2))
+plot(model_rq1)
+par(mfrow = c(1, 1))
+```
+
+-   Residual–fitted plots do not show strong curvature after log-transforming GDP per capita.
+-   Q–Q plots show mild tail deviations but are broadly consistent with normal residuals.
+-   Scale–location plots show some heteroskedasticity (fan shape), common in cross-country data.
+-   Cook’s distances are well below 1 for all observations, so no single influential point.
+-   Variance Inflation Factors for predictors were all below 2, indicating no severe multicollinearity.
+
+**Potential confounders.** We do not control for some variables that may confound the association between GDP per capita and carbon intensity, including energy policy stringency, resource endowment (e.g., hydro or fossil reserves), and industrial structure. As a result, the estimated GDP effects may partly capture differences in these omitted structural and policy factors.
+
+### RQ2: Predicting \>50% renewable electricity
+
+We modeled the probability that a country–year has **more than 50% of its electricity from renewables** using a logistic regression:
+
+$$
+\Pr(Y_{it} = 1)
+= \text{logit}^{-1}\left(
+\alpha_0
++ \alpha_1 \log(\text{GDPpc}_{it})
++ \alpha_2 \log(\text{Generation}_{it})
++ \alpha_3 \text{FossilShare}_{it}
+\right),
+$$
+
+where $Y_{it} = 1$ if the renewable share exceeds 50% and $0$ otherwise.
+
+```{r rq2-full-output, results='asis'}
+rq2_full_tbl <- tidy(model_rq2, conf.int = TRUE, exponentiate = TRUE) %>%
+  mutate(
+    estimate = round(estimate, 3),
+    std.error = round(std.error, 3),
+    statistic = round(statistic, 3),
+    p_val_fmt = formatC(p.value, format = "e", digits = 2),
+    conf.low = round(conf.low, 3),
+    conf.high = round(conf.high, 3)
+  ) %>%
+  select(
+    term,
+    OR = estimate,
+    `Std. Error` = std.error,
+    `z-stat` = statistic,
+    `p-value` = p_val_fmt,
+    `Conf. Low` = conf.low,
+    `Conf. High` = conf.high
+  )
+
+kable(
+  rq2_full_tbl,
+  caption = "Full logistic regression output (odds ratios) for renewable majority model."
+)
+```
+
+#### Diagnostics
+
+```{r rq2-diagnostics, fig.cap="Influential points measured by Cook\u2019s distance for the logistic regression model.", fig.height=3, fig.width=4.5, fig.align='center', fig.pos='H'}
+cooks_rq2 <- cooks.distance(model_rq2)
+cooks_df <- tibble(
+  index = seq_along(cooks_rq2),
+  cooksd = cooks_rq2
+)
+
+ggplot(cooks_df, aes(x = index, y = cooksd)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    x = "Observation index",
+    y = "Cook's distance"
+  )
+```
+
+All Cook’s distances are essentially near zero and well below 1, which means no observation has unusually large influence on the logistic model—this matches what we observed in our plot.
+
+We also examined the ROC curve and AUC (see the ROC figure in the memo section), which confirm that the model has very high discriminative ability, driven mainly by the fossil fuel share predictor.
+
+**Potential confounders.** Key omitted variables that may confound the relationships in this model include renewable resource potential (e.g., solar irradiation, hydro capacity), policy support for renewables (feed-in tariffs, renewable portfolio standards), and grid flexibility constraints. Countries with strong renewable resources and supportive policies are both more likely to have low fossil shares and to reach majority-renewable status, so part of the fossil-share effect may reflect these underlying structural advantages.
+
+## Next Steps
+
+Limitations and potential extensions include:
+
+-   **Causality.** Our models are associative, not causal. Future work could use fixed-effects panel models or instruments to isolate the causal effects of income and policy variables.
+-   **Omitted variables / confounding.** Resource endowments (solar, wind, hydro potential), policy strength, and technology costs were not included but may confound some of the associations we observe.
+-   **Threshold choice.** We focused on a 50% renewable threshold; examining other thresholds (e.g., 30%, 80%) could provide a more nuanced picture of transition stages.
+-   **Temporal dynamics.** Countries’ transitions are path-dependent. Dynamic models that incorporate lagged variables, investment cycles, or structural breaks could yield deeper insights.
+
+# Work Cited
+
+Ember Climate. *Global Electricity Review*. Ember Climate, various years, ember-climate.org/data/data-tools/global-electricity-review/.
+
+International Energy Agency. *World Energy Outlook*. IEA, various years, www.iea.org/reports/world-energy-outlook.
+
+Intergovernmental Panel on Climate Change. *Sixth Assessment Report: Mitigation of Climate Change*. IPCC, 2022, www.ipcc.ch/report/ar6/wg3/.
+
+Our World in Data. "Global Primary Energy" and "Electricity Mix." *Energy Data*, ourworldindata.org/energy.
+
+World Bank. *World Bank Country and Lending Groups*. World Bank, databank.worldbank.org/data/download/site-content/OGHIST.xls.
